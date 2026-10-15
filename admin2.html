@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RDK QR — Administration</title>
+<meta name="robots" content="noindex">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root{--bg:#f4f6fb;--card:#fff;--txt:#1d2433;--mut:#6b7385;--pri:#2457d6;--red:#c62f2f;--bd:#dfe3ec}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+  header{background:var(--pri);color:#fff;padding:14px 16px;display:flex;justify-content:space-between;align-items:center}
+  header h1{font-size:19px;margin:0}
+  main{max-width:900px;margin:auto;padding:16px}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+  label{display:block;font-weight:600;margin:12px 0 4px}
+  input[type=text],input[type=password],textarea{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;font:inherit}
+  textarea{min-height:90px}
+  button,.btn{background:var(--pri);color:#fff;border:0;border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer;text-decoration:none;display:inline-block}
+  button.sec,.btn.sec{background:#e8ecf6;color:var(--txt)}
+  button.del{background:var(--red)}
+  button:disabled{opacity:.5}
+  .mut{color:var(--mut);font-size:14px}
+  .item{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;border-top:1px solid var(--bd);padding:14px 0}
+  .item:first-child{border-top:0}
+  .qr{width:140px;height:140px;flex:none}
+  .qr canvas,.qr img{width:140px!important;height:140px!important}
+  .info{flex:1;min-width:200px}
+  .info h3{margin:0 0 6px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  #status{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:10px 16px;border-radius:8px;display:none;max-width:90%}
+  .files li{margin:3px 0}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<header><h1>📦 RDK QR</h1><button class="sec" id="logout" style="display:none">Déconnexion</button></header>
+<main>
+
+  <!-- Connexion -->
+  <div class="card" id="login">
+    <h2>Connexion</h2>
+    <p class="mut">Colle ton <b>token GitHub</b> ici. Il reste seulement dans ce navigateur.</p>
+    <input type="password" id="tok" placeholder="github_pat_...">
+    <div class="row"><button id="saveTok">Entrer</button></div>
+  </div>
+
+  <div id="app" class="hide">
+    <!-- Formulaire -->
+    <div class="card">
+      <h2 id="formTitle">➕ Nouvel élément</h2>
+      <label>Titre *</label>
+      <input type="text" id="f_title" placeholder="Ex : Facture fournisseur, Cours Python...">
+      <label>Note / texte</label>
+      <textarea id="f_text" placeholder="Écris ce que tu veux..."></textarea>
+      <label>Liens (un par ligne — site, YouTube, Google Drive...)</label>
+      <textarea id="f_links" placeholder="https://..."></textarea>
+      <label>Fichiers (images, vidéos, PDF...)</label>
+      <div class="mut">🪄 Les grandes images et vidéos sont réduites automatiquement. Pour une vidéo, garde la page ouverte pendant la réduction.</div>
+      <div class="row">
+        <label class="btn sec" style="margin:0;font-weight:400">📄 Choisir des fichiers<input type="file" id="f_files" multiple hidden></label>
+        <label class="btn sec" style="margin:0;font-weight:400">📁 Choisir un dossier entier<input type="file" id="f_dir" webkitdirectory multiple hidden></label>
+      </div>
+      <div class="mut" id="picked">Aucun fichier choisi</div>
+      <ul class="files" id="oldFiles"></ul>
+      <div class="row">
+        <button id="save">💾 Enregistrer + QR code</button>
+        <button class="sec hide" id="cancel">Annuler</button>
+      </div>
+    </div>
+
+    <!-- Liste -->
+    <div class="card">
+      <h2>📋 Mes éléments (<span id="count">0</span>)</h2>
+      <input type="text" id="search" placeholder="🔍 Rechercher...">
+      <div id="list"></div>
+    </div>
+  </div>
+</main>
+<div id="status"></div>
+
+<script>
+const OWNER = 'rdkqrcode', REPO = 'rdkqrcode.github.io', BRANCH = 'main';
+const SITE = 'https://rdkqrcode.github.io';
+const API = `https://api.github.com/repos/${OWNER}/${REPO}/contents/`;
+let token = null, items = [], sha = null, editing = null, keepFiles = [];
+
+const $ = id => document.getElementById(id);
+function store(k, v){ try{ v===undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v) }catch(e){} }
+function read(k){ try{ return localStorage.getItem(k) }catch(e){ return null } }
+function msg(t, ms=2500){ const s=$('status'); s.textContent=t; s.style.display='block'; clearTimeout(s._t); if(ms) s._t=setTimeout(()=>s.style.display='none', ms); }
+function esc(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+const b64 = s => btoa(unescape(encodeURIComponent(s)));
+const unb64 = s => decodeURIComponent(escape(atob(s.replace(/\n/g,''))));
+const viewUrl = id => `${SITE}/v.html?id=${id}`;
+
+async function gh(path, opts={}){
+  const r = await fetch(API + path, { ...opts, headers:{ Authorization:'Bearer '+token, Accept:'application/vnd.github+json', ...(opts.headers||{}) } });
+  if(r.status === 404) return null;
+  if(!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.message || ('Erreur '+r.status)); }
+  return r.json();
+}
+
+async function loadItems(){
+  const d = await gh('data/items.json?ref='+BRANCH+'&t='+Date.now());
+  if(d){ sha = d.sha; items = JSON.parse(unb64(d.content)); } else { sha = null; items = []; }
+  render();
+}
+
+async function saveItems(message){
+  const body = { message, branch:BRANCH, content: b64(JSON.stringify(items, null, 1)) };
+  if(sha) body.sha = sha;
+  const d = await gh('data/items.json', { method:'PUT', body: JSON.stringify(body) });
+  sha = d.content.sha;
+}
+
+function fileToB64(file){
+  return new Promise((res, rej)=>{ const r = new FileReader(); r.onload = ()=>res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(file); });
+}
+
+const MB = 1024*1024, LIMIT = 20*MB;
+
+// ---------- Réduction automatique des images ----------
+async function compressImage(file){
+  if(!/^image\/(jpeg|png|webp|bmp)$/.test(file.type) || file.size < 1.5*MB) return file;
+  const img = await createImageBitmap(file);
+  let max = 2048, q = 0.85, blob;
+  for(let i=0; i<6; i++){
+    const s = Math.min(1, max / Math.max(img.width, img.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0,0,c.width,c.height);
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    blob = await new Promise(r=>c.toBlob(r, 'image/jpeg', q));
+    if(blob.size <= 3*MB) break;
+    max *= 0.8; q -= 0.07;
+  }
+  if(blob.size >= file.size) return file;
+  return new File([blob], file.name.replace(/\.\w+$/,'') + '.jpg', { type:'image/jpeg' });
+}
+
+// ---------- Réduction automatique des vidéos ----------
+async function compressVideo(file, onProg){
+  if(file.size <= LIMIT) return file;
+  if(!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream)
+    throw new Error('Ce navigateur ne peut pas réduire la vidéo. Utilise Chrome, ou mets-la sur YouTube.');
+  const url = URL.createObjectURL(file);
+  const v = document.createElement('video');
+  v.src = url; v.playsInline = true; v.preload = 'auto';
+  await new Promise((res, rej)=>{ v.onloadedmetadata = res; v.onerror = ()=>rej(new Error('Vidéo illisible : '+file.name)); });
+  const dur = v.duration;
+  let vbr = Math.floor((18*8*MB) / dur) - 64000;
+  if(vbr < 200000){ URL.revokeObjectURL(url); throw new Error(`Vidéo trop longue (${Math.round(dur/60)} min) pour être réduite : mets-la sur YouTube (Non répertoriée) et colle le lien.`); }
+  vbr = Math.min(vbr, 2500000);
+  const maxSide = vbr > 1200000 ? 1280 : 854;
+  const s = Math.min(1, maxSide / Math.max(v.videoWidth, v.videoHeight));
+  const c = document.createElement('canvas');
+  c.width = Math.round(v.videoWidth*s/2)*2; c.height = Math.round(v.videoHeight*s/2)*2;
+  const ctx = c.getContext('2d');
+  const stream = c.captureStream(30);
+  let ac = null;
+  try{
+    ac = new AudioContext();
+    const src = ac.createMediaElementSource(v), dst = ac.createMediaStreamDestination();
+    src.connect(dst);
+    dst.stream.getAudioTracks().forEach(t=>stream.addTrack(t));
+    await ac.resume();
+  }catch(e){}
+  const mime = ['video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm']
+    .find(m=>MediaRecorder.isTypeSupported(m)) || '';
+  const rec = new MediaRecorder(stream, { mimeType:mime, videoBitsPerSecond:vbr, audioBitsPerSecond:64000 });
+  const chunks = [];
+  rec.ondataavailable = e=>{ if(e.data.size) chunks.push(e.data); };
+  const stopped = new Promise(r=>rec.onstop=r);
+  let done = false;
+  (function draw(){ ctx.drawImage(v, 0, 0, c.width, c.height); if(!done) requestAnimationFrame(draw); })();
+  v.ontimeupdate = ()=>onProg(Math.min(99, Math.round(v.currentTime/dur*100)));
+  rec.start(1000);
+  await v.play();
+  await new Promise(r=>v.onended=r);
+  done = true; rec.stop(); await stopped;
+  stream.getTracks().forEach(t=>t.stop()); if(ac) ac.close(); URL.revokeObjectURL(url);
+  const type = (rec.mimeType || mime || 'video/webm').split(';')[0];
+  const blob = new Blob(chunks, { type });
+  if(blob.size > LIMIT) throw new Error('Vidéo encore trop grande après réduction : mets-la sur YouTube et colle le lien.');
+  return new File([blob], file.name.replace(/\.\w+$/,'') + (type.includes('mp4') ? '.mp4' : '.webm'), { type });
+}
+
+async function prepareFile(file, label){
+  if(file.type.startsWith('image/')){ msg(`🪄 Réduction image ${label}...`, 0); return compressImage(file); }
+  if(file.type.startsWith('video/') && file.size > LIMIT){
+    return compressVideo(file, p=>msg(`🪄 Réduction vidéo ${label} : ${p}% — garde la page ouverte`, 0));
+  }
+  return file;
+}
+
+async function uploadFile(file, id){
+  const clean = file.name.normalize('NFD').replace(/[^\w.\-]+/g,'_');
+  const path = `media/${id}/${Date.now()}_${clean}`;
+  await gh(path, { method:'PUT', body: JSON.stringify({ message:'Fichier '+clean, branch:BRANCH, content: await fileToB64(file) }) });
+  return { path, name:file.name, type:file.type };
+}
+
+async function login(t){
+  token = t;
+  try{
+    msg('Connexion...', 0);
+    await loadItems();
+    store('rdk_token', t);
+    $('login').classList.add('hide'); $('app').classList.remove('hide'); $('logout').style.display='inline-block';
+    msg('Connecté ✅');
+  }catch(e){ token=null; msg('❌ Token invalide : '+e.message, 5000); }
+}
+
+function resetForm(){
+  editing = null; keepFiles = [];
+  ['f_title','f_text','f_links'].forEach(i=>$(i).value='');
+  $('f_files').value=''; $('f_dir').value=''; showPicked(); $('oldFiles').innerHTML='';
+  $('formTitle').textContent='➕ Nouvel élément'; $('cancel').classList.add('hide');
+}
+
+function showOldFiles(){
+  $('oldFiles').innerHTML = keepFiles.map((f,i)=>`<li>📎 ${esc(f.name)} <button class="sec" data-rm="${i}">✕</button></li>`).join('');
+  $('oldFiles').querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{ keepFiles.splice(+b.dataset.rm,1); showOldFiles(); });
+}
+
+$('save').onclick = async ()=>{
+  const title = $('f_title').value.trim();
+  if(!title) return msg('⚠️ Écris un titre');
+  const raw = pickedFiles();
+  $('save').disabled = true;
+  try{
+    const files = [];
+    for(let i=0;i<raw.length;i++){
+      const f = await prepareFile(raw[i], `${i+1}/${raw.length}`);
+      if(f.size > LIMIT) throw new Error(`« ${raw[i].name} » dépasse 20 Mo : mets-le sur Google Drive et colle le lien.`);
+      files.push(f);
+    }
+    const id = editing || (Date.now().toString(36) + Math.random().toString(36).slice(2,6));
+    const uploaded = [];
+    for(let i=0;i<files.length;i++){ msg(`Envoi fichier ${i+1}/${files.length}...`, 0); uploaded.push(await uploadFile(files[i], id)); }
+    const data = {
+      id, title,
+      text: $('f_text').value,
+      links: $('f_links').value.split('\n').map(s=>s.trim()).filter(Boolean),
+      files: [...keepFiles, ...uploaded],
+      updated: new Date().toISOString()
+    };
+    msg('Enregistrement...', 0);
+    await loadItems();
+    const idx = items.findIndex(x=>x.id===id);
+    if(idx>=0){ data.created = items[idx].created; items[idx] = data; }
+    else { data.created = data.updated; items.unshift(data); }
+    await saveItems((idx>=0?'Modif ':'Ajout ') + title);
+    resetForm(); render();
+    msg('✅ Enregistré ! Le QR marche dans 1–2 minutes.', 4000);
+  }catch(e){ msg('❌ '+e.message, 6000); }
+  $('save').disabled = false;
+};
+
+$('cancel').onclick = resetForm;
+
+function edit(id){
+  const it = items.find(x=>x.id===id); if(!it) return;
+  editing = id;
+  $('f_title').value = it.title; $('f_text').value = it.text||''; $('f_links').value = (it.links||[]).join('\n');
+  keepFiles = [...(it.files||[])]; showOldFiles();
+  $('formTitle').textContent = '✏️ Modifier : '+it.title; $('cancel').classList.remove('hide');
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+async function del(id){
+  const it = items.find(x=>x.id===id);
+  if(!confirm(`Supprimer « ${it.title} » ? Son QR code ne marchera plus.`)) return;
+  try{ msg('Suppression...',0); await loadItems(); items = items.filter(x=>x.id!==id); await saveItems('Suppression '+it.title); render(); msg('🗑️ Supprimé'); }
+  catch(e){ msg('❌ '+e.message, 5000); }
+}
+
+function downloadQR(id, title){
+  const c = document.querySelector(`#qr_${id} canvas`);
+  const a = document.createElement('a');
+  a.href = c.toDataURL('image/png'); a.download = 'QR_' + title.replace(/[^\w\-]+/g,'_') + '.png'; a.click();
+}
+
+function render(){
+  const q = ($('search').value||'').toLowerCase();
+  const list = items.filter(it => (it.title+' '+(it.text||'')).toLowerCase().includes(q));
+  $('count').textContent = items.length;
+  $('list').innerHTML = list.length ? list.map(it=>`
+    <div class="item">
+      <div class="qr" id="qr_${it.id}"></div>
+      <div class="info">
+        <h3>${esc(it.title)}</h3>
+        <div class="mut">${(it.files||[]).length} fichier(s) · ${(it.links||[]).length} lien(s) · ${new Date(it.updated).toLocaleDateString('fr-FR')}</div>
+        <div class="mut" style="word-break:break-all">${viewUrl(it.id)}</div>
+        <div class="row">
+          <button data-dl="${it.id}">⬇️ Télécharger QR</button>
+          <a class="btn sec" href="${viewUrl(it.id)}" target="_blank">👁️ Voir</a>
+          <button class="sec" data-ed="${it.id}">✏️ Modifier</button>
+          <button class="del" data-del="${it.id}">🗑️</button>
+        </div>
+      </div>
+    </div>`).join('') : '<p class="mut">Aucun élément pour le moment.</p>';
+  list.forEach(it => new QRCode($('qr_'+it.id), { text:viewUrl(it.id), width:400, height:400, correctLevel:QRCode.CorrectLevel.M }));
+  $('list').querySelectorAll('[data-dl]').forEach(b=>b.onclick=()=>{ const it=items.find(x=>x.id===b.dataset.dl); downloadQR(it.id, it.title); });
+  $('list').querySelectorAll('[data-ed]').forEach(b=>b.onclick=()=>edit(b.dataset.ed));
+  $('list').querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>del(b.dataset.del));
+}
+
+function pickedFiles(){
+  return [...$('f_files').files, ...$('f_dir').files].filter(f => !f.name.startsWith('.') && f.size > 0);
+}
+function showPicked(){
+  const fs = pickedFiles();
+  const dir = $('f_dir').files[0]?.webkitRelativePath?.split('/')[0];
+  $('picked').textContent = fs.length
+    ? `✅ ${fs.length} fichier(s) choisi(s)` + (dir ? ` — dossier « ${dir} »` : '')
+    : 'Aucun fichier choisi';
+  if(dir && !$('f_title').value.trim()) $('f_title').value = dir;
+}
+$('f_files').onchange = showPicked;
+$('f_dir').onchange = showPicked;
+
+$('search').oninput = render;
+$('saveTok').onclick = ()=>{ const t=$('tok').value.trim(); if(t) login(t); };
+$('logout').onclick = ()=>{ store('rdk_token'); location.reload(); };
+
+const saved = read('rdk_token'); if(saved) login(saved);
+</script>
+</body>
+</html>
