@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RDK QR — Administration</title>
+<meta name="robots" content="noindex">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+  :root{--bg:#f4f6fb;--card:#fff;--txt:#1d2433;--mut:#6b7385;--pri:#2457d6;--red:#c62f2f;--bd:#dfe3ec}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+  header{background:var(--pri);color:#fff;padding:14px 16px;display:flex;justify-content:space-between;align-items:center}
+  header h1{font-size:19px;margin:0}
+  main{max-width:900px;margin:auto;padding:16px}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+  label{display:block;font-weight:600;margin:12px 0 4px}
+  input[type=text],input[type=password],textarea{width:100%;padding:10px;border:1px solid var(--bd);border-radius:8px;font:inherit}
+  textarea{min-height:90px}
+  button,.btn{background:var(--pri);color:#fff;border:0;border-radius:8px;padding:9px 14px;font:inherit;cursor:pointer;text-decoration:none;display:inline-block}
+  button.sec,.btn.sec{background:#e8ecf6;color:var(--txt)}
+  button.del{background:var(--red)}
+  button:disabled{opacity:.5}
+  .mut{color:var(--mut);font-size:14px}
+  .item{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;border-top:1px solid var(--bd);padding:14px 0}
+  .item:first-child{border-top:0}
+  .qr{width:140px;height:140px;flex:none}
+  .qr canvas,.qr img{width:140px!important;height:140px!important}
+  .info{flex:1;min-width:200px}
+  .info h3{margin:0 0 6px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  #status{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:10px 16px;border-radius:8px;display:none;max-width:90%}
+  .files li{margin:3px 0}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<header><h1>📦 RDK QR</h1><button class="sec" id="logout" style="display:none">Déconnexion</button></header>
+<main>
+
+  <!-- Connexion -->
+  <div class="card" id="login">
+    <h2>Connexion</h2>
+    <p class="mut">Colle ton <b>token GitHub</b> ici. Il reste seulement dans ce navigateur.</p>
+    <input type="password" id="tok" placeholder="github_pat_...">
+    <div class="row"><button id="saveTok">Entrer</button></div>
+  </div>
+
+  <div id="app" class="hide">
+    <!-- Formulaire -->
+    <div class="card">
+      <h2 id="formTitle">➕ Nouvel élément</h2>
+      <label>Titre *</label>
+      <input type="text" id="f_title" placeholder="Ex : Facture fournisseur, Cours Python...">
+      <label>Note / texte</label>
+      <textarea id="f_text" placeholder="Écris ce que tu veux..."></textarea>
+      <label>Liens (un par ligne — site, YouTube, Google Drive...)</label>
+      <textarea id="f_links" placeholder="https://..."></textarea>
+      <label>Fichiers (images, vidéos, PDF... max 20 Mo chacun)</label>
+      <input type="file" id="f_files" multiple>
+      <ul class="files" id="oldFiles"></ul>
+      <div class="row">
+        <button id="save">💾 Enregistrer + QR code</button>
+        <button class="sec hide" id="cancel">Annuler</button>
+      </div>
+    </div>
+
+    <!-- Liste -->
+    <div class="card">
+      <h2>📋 Mes éléments (<span id="count">0</span>)</h2>
+      <input type="text" id="search" placeholder="🔍 Rechercher...">
+      <div id="list"></div>
+    </div>
+  </div>
+</main>
+<div id="status"></div>
+
+<script>
+const OWNER = 'rdkqrcode', REPO = 'rdkqrcode.github.io', BRANCH = 'main';
+const SITE = 'https://rdkqrcode.github.io';
+const API = `https://api.github.com/repos/${OWNER}/${REPO}/contents/`;
+let token = null, items = [], sha = null, editing = null, keepFiles = [];
+
+const $ = id => document.getElementById(id);
+function store(k, v){ try{ v===undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v) }catch(e){} }
+function read(k){ try{ return localStorage.getItem(k) }catch(e){ return null } }
+function msg(t, ms=2500){ const s=$('status'); s.textContent=t; s.style.display='block'; clearTimeout(s._t); if(ms) s._t=setTimeout(()=>s.style.display='none', ms); }
+function esc(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+const b64 = s => btoa(unescape(encodeURIComponent(s)));
+const unb64 = s => decodeURIComponent(escape(atob(s.replace(/\n/g,''))));
+const viewUrl = id => `${SITE}/v.html?id=${id}`;
+
+async function gh(path, opts={}){
+  const r = await fetch(API + path, { ...opts, headers:{ Authorization:'Bearer '+token, Accept:'application/vnd.github+json', ...(opts.headers||{}) } });
+  if(r.status === 404) return null;
+  if(!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.message || ('Erreur '+r.status)); }
+  return r.json();
+}
+
+async function loadItems(){
+  const d = await gh('data/items.json?ref='+BRANCH+'&t='+Date.now());
+  if(d){ sha = d.sha; items = JSON.parse(unb64(d.content)); } else { sha = null; items = []; }
+  render();
+}
+
+async function saveItems(message){
+  const body = { message, branch:BRANCH, content: b64(JSON.stringify(items, null, 1)) };
+  if(sha) body.sha = sha;
+  const d = await gh('data/items.json', { method:'PUT', body: JSON.stringify(body) });
+  sha = d.content.sha;
+}
+
+function fileToB64(file){
+  return new Promise((res, rej)=>{ const r = new FileReader(); r.onload = ()=>res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(file); });
+}
+
+async function uploadFile(file, id){
+  const clean = file.name.normalize('NFD').replace(/[^\w.\-]+/g,'_');
+  const path = `media/${id}/${Date.now()}_${clean}`;
+  await gh(path, { method:'PUT', body: JSON.stringify({ message:'Fichier '+clean, branch:BRANCH, content: await fileToB64(file) }) });
+  return { path, name:file.name, type:file.type };
+}
+
+async function login(t){
+  token = t;
+  try{
+    msg('Connexion...', 0);
+    await loadItems();
+    store('rdk_token', t);
+    $('login').classList.add('hide'); $('app').classList.remove('hide'); $('logout').style.display='inline-block';
+    msg('Connecté ✅');
+  }catch(e){ token=null; msg('❌ Token invalide : '+e.message, 5000); }
+}
+
+function resetForm(){
+  editing = null; keepFiles = [];
+  ['f_title','f_text','f_links'].forEach(i=>$(i).value='');
+  $('f_files').value=''; $('oldFiles').innerHTML='';
+  $('formTitle').textContent='➕ Nouvel élément'; $('cancel').classList.add('hide');
+}
+
+function showOldFiles(){
+  $('oldFiles').innerHTML = keepFiles.map((f,i)=>`<li>📎 ${esc(f.name)} <button class="sec" data-rm="${i}">✕</button></li>`).join('');
+  $('oldFiles').querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{ keepFiles.splice(+b.dataset.rm,1); showOldFiles(); });
+}
+
+$('save').onclick = async ()=>{
+  const title = $('f_title').value.trim();
+  if(!title) return msg('⚠️ Écris un titre');
+  const files = [...$('f_files').files];
+  if(files.some(f=>f.size > 20*1024*1024)) return msg('⚠️ Fichier > 20 Mo : mets-le sur YouTube/Drive et colle le lien', 5000);
+  $('save').disabled = true;
+  try{
+    const id = editing || (Date.now().toString(36) + Math.random().toString(36).slice(2,6));
+    const uploaded = [];
+    for(let i=0;i<files.length;i++){ msg(`Envoi fichier ${i+1}/${files.length}...`, 0); uploaded.push(await uploadFile(files[i], id)); }
+    const data = {
+      id, title,
+      text: $('f_text').value,
+      links: $('f_links').value.split('\n').map(s=>s.trim()).filter(Boolean),
+      files: [...keepFiles, ...uploaded],
+      updated: new Date().toISOString()
+    };
+    msg('Enregistrement...', 0);
+    await loadItems();
+    const idx = items.findIndex(x=>x.id===id);
+    if(idx>=0){ data.created = items[idx].created; items[idx] = data; }
+    else { data.created = data.updated; items.unshift(data); }
+    await saveItems((idx>=0?'Modif ':'Ajout ') + title);
+    resetForm(); render();
+    msg('✅ Enregistré ! Le QR marche dans 1–2 minutes.', 4000);
+  }catch(e){ msg('❌ '+e.message, 6000); }
+  $('save').disabled = false;
+};
+
+$('cancel').onclick = resetForm;
+
+function edit(id){
+  const it = items.find(x=>x.id===id); if(!it) return;
+  editing = id;
+  $('f_title').value = it.title; $('f_text').value = it.text||''; $('f_links').value = (it.links||[]).join('\n');
+  keepFiles = [...(it.files||[])]; showOldFiles();
+  $('formTitle').textContent = '✏️ Modifier : '+it.title; $('cancel').classList.remove('hide');
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+async function del(id){
+  const it = items.find(x=>x.id===id);
+  if(!confirm(`Supprimer « ${it.title} » ? Son QR code ne marchera plus.`)) return;
+  try{ msg('Suppression...',0); await loadItems(); items = items.filter(x=>x.id!==id); await saveItems('Suppression '+it.title); render(); msg('🗑️ Supprimé'); }
+  catch(e){ msg('❌ '+e.message, 5000); }
+}
+
+function downloadQR(id, title){
+  const c = document.querySelector(`#qr_${id} canvas`);
+  const a = document.createElement('a');
+  a.href = c.toDataURL('image/png'); a.download = 'QR_' + title.replace(/[^\w\-]+/g,'_') + '.png'; a.click();
+}
+
+function render(){
+  const q = ($('search').value||'').toLowerCase();
+  const list = items.filter(it => (it.title+' '+(it.text||'')).toLowerCase().includes(q));
+  $('count').textContent = items.length;
+  $('list').innerHTML = list.length ? list.map(it=>`
+    <div class="item">
+      <div class="qr" id="qr_${it.id}"></div>
+      <div class="info">
+        <h3>${esc(it.title)}</h3>
+        <div class="mut">${(it.files||[]).length} fichier(s) · ${(it.links||[]).length} lien(s) · ${new Date(it.updated).toLocaleDateString('fr-FR')}</div>
+        <div class="mut" style="word-break:break-all">${viewUrl(it.id)}</div>
+        <div class="row">
+          <button data-dl="${it.id}">⬇️ Télécharger QR</button>
+          <a class="btn sec" href="${viewUrl(it.id)}" target="_blank">👁️ Voir</a>
+          <button class="sec" data-ed="${it.id}">✏️ Modifier</button>
+          <button class="del" data-del="${it.id}">🗑️</button>
+        </div>
+      </div>
+    </div>`).join('') : '<p class="mut">Aucun élément pour le moment.</p>';
+  list.forEach(it => new QRCode($('qr_'+it.id), { text:viewUrl(it.id), width:400, height:400, correctLevel:QRCode.CorrectLevel.M }));
+  $('list').querySelectorAll('[data-dl]').forEach(b=>b.onclick=()=>{ const it=items.find(x=>x.id===b.dataset.dl); downloadQR(it.id, it.title); });
+  $('list').querySelectorAll('[data-ed]').forEach(b=>b.onclick=()=>edit(b.dataset.ed));
+  $('list').querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>del(b.dataset.del));
+}
+
+$('search').oninput = render;
+$('saveTok').onclick = ()=>{ const t=$('tok').value.trim(); if(t) login(t); };
+$('logout').onclick = ()=>{ store('rdk_token'); location.reload(); };
+
+const saved = read('rdk_token'); if(saved) login(saved);
+</script>
+</body>
+</html>

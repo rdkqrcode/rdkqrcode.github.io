@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RDK QR</title>
+<style>
+  :root{--bg:#f4f6fb;--card:#fff;--txt:#1d2433;--mut:#6b7385;--pri:#2457d6;--bd:#dfe3ec}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt)}
+  main{max-width:760px;margin:auto;padding:16px}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:18px;margin-bottom:14px}
+  h1{margin:0 0 6px;font-size:24px}
+  .mut{color:var(--mut);font-size:14px}
+  .text{white-space:pre-wrap;line-height:1.6;font-size:17px}
+  img,video{max-width:100%;border-radius:8px;display:block;margin:8px 0}
+  iframe{width:100%;aspect-ratio:16/9;border:0;border-radius:8px}
+  a.btn{display:block;background:var(--pri);color:#fff;text-decoration:none;padding:12px;border-radius:8px;margin:8px 0;word-break:break-all;text-align:center}
+</style>
+</head>
+<body>
+<main id="m"><div class="card">Chargement...</div></main>
+<script>
+function esc(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function ytId(u){ const m = u.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{11})/); return m && m[1]; }
+
+(async ()=>{
+  const id = new URLSearchParams(location.search).get('id');
+  const m = document.getElementById('m');
+  try{
+    const items = await fetch('data/items.json?t='+Date.now()).then(r=>r.json());
+    const it = items.find(x=>x.id===id);
+    if(!it){ m.innerHTML = '<div class="card"><h1>❌ Introuvable</h1><p class="mut">Cet élément n\'existe pas ou a été supprimé.</p></div>'; return; }
+    document.title = it.title;
+    let h = `<div class="card"><h1>${esc(it.title)}</h1><div class="mut">Mis à jour le ${new Date(it.updated).toLocaleDateString('fr-FR')}</div></div>`;
+    if(it.text) h += `<div class="card text">${esc(it.text)}</div>`;
+    for(const f of it.files||[]){
+      const p = encodeURI(f.path), ext = f.path.split('.').pop().toLowerCase();
+      if(/^(jpe?g|png|gif|webp|bmp|svg)$/.test(ext)) h += `<div class="card"><img src="${p}" alt="${esc(f.name)}"></div>`;
+      else if(/^(mp4|webm|mov|m4v)$/.test(ext)) h += `<div class="card"><video src="${p}" controls playsinline></video></div>`;
+      else if(/^(mp3|wav|ogg|m4a)$/.test(ext)) h += `<div class="card"><audio src="${p}" controls style="width:100%"></audio></div>`;
+      else h += `<div class="card"><a class="btn" href="${p}" target="_blank">📎 ${esc(f.name)}</a></div>`;
+    }
+    for(const l of it.links||[]){
+      const y = ytId(l);
+      h += y ? `<div class="card"><iframe src="https://www.youtube.com/embed/${y}" allowfullscreen></iframe></div>`
+             : `<div class="card"><a class="btn" href="${esc(l)}" target="_blank" rel="noopener">🔗 ${esc(l)}</a></div>`;
+    }
+    m.innerHTML = h;
+  }catch(e){ m.innerHTML = '<div class="card"><h1>Aucun contenu pour le moment</h1></div>'; }
+})();
+</script>
+</body>
+</html>
